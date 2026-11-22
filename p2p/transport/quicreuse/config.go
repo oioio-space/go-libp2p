@@ -6,6 +6,10 @@ import (
 	"github.com/quic-go/quic-go"
 )
 
+// defaultInitialConnectionReceiveWindow is quic-go's initial connection receive window when the config leaves it
+// zero (protocol.DefaultInitialMaxData: 1.5 × its 512 KiB initial stream window).
+const defaultInitialConnectionReceiveWindow = 768 << 10
+
 var quicConfig = &quic.Config{
 	MaxIncomingStreams:         256,
 	MaxIncomingUniStreams:      5,              // allow some unidirectional streams, in case we speak WebTransport

@@ -13,6 +13,7 @@ import (
 	"net"
 	"sync"
 
+	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/gologshim"
 	"github.com/libp2p/go-netroute"
 	ma "github.com/multiformats/go-multiaddr"
@@ -72,6 +73,13 @@ type ConnManager struct {
 	verifySourceAddress func(addr net.Addr) bool
 
 	qlogTracerDir string
+
+	// initialStreamWindow and initialConnWindow, if not zero, are the initial receive windows of every
+	// connection (InitialReceiveWindows); accountInitialWindow makes the QUIC transport reserve the initial
+	// connection window in each connection's resource scope (AccountInitialConnectionWindow).
+	initialStreamWindow  uint64
+	initialConnWindow    uint64
+	accountInitialWindow bool
 }
 
 type quicListenerEntry struct {
@@ -111,6 +119,10 @@ func NewConnManager(statelessResetKey quic.StatelessResetKey, tokenKey quic.Toke
 	}
 
 	quicConf := quicConfig.Clone()
+	if cm.initialStreamWindow != 0 {
+		quicConf.InitialStreamReceiveWindow = cm.initialStreamWindow
+		quicConf.InitialConnectionReceiveWindow = cm.initialConnWindow
+	}
 	// quic-go takes care of disabling this if QLOGDIR Environment variable isn't present
 	quicConf.Tracer = qlog.DefaultConnectionTracer
 	serverConfig := quicConf.Clone()
@@ -432,3 +444,45 @@ func newQUICTransport(
 		VerifySourceAddress: verifySourceAddress,
 	}
 }
+
+// InitialConnectionWindowReservation is how many bytes the QUIC transport reserves in the resource scope of each
+// connection when it opens it: the initial connection receive window with AccountInitialConnectionWindow, else 0.
+func (c *ConnManager) InitialConnectionWindowReservation() int {
+	if !c.accountInitialWindow {
+		return 0
+	}
+	w := c.clientConfig.InitialConnectionReceiveWindow
+	if w == 0 {
+		w = defaultInitialConnectionReceiveWindow
+	}
+	return int(w)
+}
+
+func (c *ConnManager) inboundScope(rm network.ResourceManager) connContextFunc {
+	return func(ctx context.Context, info *quic.ClientInfo) (context.Context, error) {
+		addr, err := ToQuicMultiaddr(info.RemoteAddr, quic.Version1)
+		if err != nil {
+			return ctx, err
+		}
+		scope, err := rm.OpenConnection(network.DirInbound, false, addr)
+		if err != nil {
+			return ctx, err
+		}
+		if err := scope.ReserveMemory(c.InitialConnectionWindowReservation(), network.ReservationPriorityAlways); err != nil {
+			scope.Done()
+			return ctx, err
+		}
+		// ConnContext covers connections that never finish the handshake. Once accepted, the QUIC and
+		// libp2p close paths share the same scope and release its reservation once.
+		owned := &inboundConnScope{ConnManagementScope: scope}
+		context.AfterFunc(ctx, owned.Done)
+		return network.WithConnManagementScope(ctx, owned), nil
+	}
+}
+
+type inboundConnScope struct {
+	network.ConnManagementScope
+	done sync.Once
+}
+
+func (s *inboundConnScope) Done() { s.done.Do(s.ConnManagementScope.Done) }
