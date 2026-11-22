@@ -90,6 +90,9 @@ func (l *listener) wrapConn(qconn *quic.Conn) (*conn, error) {
 	}
 	connScope, err := network.UnwrapConnManagementScope(qconn.Context())
 	if err != nil {
+		if l.transport.connManager.InitialConnectionWindowReservation() != 0 {
+			return nil, err // Accounting requires the reservation made before the handshake.
+		}
 		connScope = nil
 		// Don't error here.
 		// Setup scope if we don't have scope from quicreuse.

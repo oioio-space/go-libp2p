@@ -138,6 +138,10 @@ func (t *transport) dialWithScope(ctx context.Context, raddr ma.Multiaddr, p pee
 		log.Debug("resource manager blocked outgoing connection for peer", "peer", p, "addr", raddr, "err", err)
 		return nil, err
 	}
+	if err := t.reserveInitialWindow(scope); err != nil {
+		log.Debug("resource manager blocked the initial window of an outgoing connection", "peer", p, "addr", raddr, "err", err)
+		return nil, err
+	}
 
 	tlsConf, keyCh := t.identity.ConfigForPeer(p)
 	ctx = quicreuse.WithAssociation(ctx, t)
@@ -347,6 +351,17 @@ func (t *transport) Listen(addr ma.Multiaddr) (tpt.Listener, error) {
 	t.listeners[udpAddr.String()] = listeners
 
 	return l, nil
+}
+
+// reserveInitialWindow reserves, in the resource scope of a new connection, the initial connection receive window
+// the ConnManager accounts for (quicreuse.AccountInitialConnectionWindow): until the application reads, a peer may
+// fill it. The scope's Done releases it.
+func (t *transport) reserveInitialWindow(scope network.ResourceScope) error {
+	n := t.connManager.InitialConnectionWindowReservation()
+	if n == 0 {
+		return nil
+	}
+	return scope.ReserveMemory(n, network.ReservationPriorityAlways)
 }
 
 func (t *transport) allowWindowIncrease(conn *quic.Conn, size uint64) bool {
